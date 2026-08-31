@@ -7,7 +7,7 @@
 UGA_Interact::UGA_Interact()
 {
 	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
-	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerOnly;   // 추가
+	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerOnly;
 }
 
 AActor* UGA_Interact::TraceForTarget(const FGameplayAbilityActorInfo* ActorInfo) const
@@ -61,8 +61,8 @@ void UGA_Interact::ActivateAbility(const FGameplayAbilitySpecHandle Handle, cons
 		ReviveInstigator = Character;
 		ReviveElapsed = 0.f;
 
-		Character->SetReviving(true);   // 추가 (살리는 사람만)
-		TargetPlayer->PauseBleedOut();   // 추가: 대상 출혈 정지
+		Character->SetReviving(true);   // 시전자만 표시 — 피격 시 부활 중단 판정에 사용
+		TargetPlayer->PauseBleedOut();   // 홀드 중에는 대상의 출혈 타이머를 멈춤 (성공 시 재개하지 않음)
 
 		// 0.1초마다 홀드 유효성 검사
 		Character->GetWorldTimerManager().SetTimer(ReviveTickHandle, [this]()
@@ -122,7 +122,7 @@ void UGA_Interact::EndAbility(const FGameplayAbilitySpecHandle Handle, const FGa
 {
 	if (APlayerCharacter* I = ReviveInstigator.Get())
 	{
-		I->SetReviving(false);   // 추가
+		I->SetReviving(false);
 	}
 
 	// 부활이 취소된 경우(성공 아님) 대상이 아직 다운이면 출혈 재개

@@ -3,7 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
 #include "AbilitySystemInterface.h"
-#include "InputActionValue.h"          // 추가
+#include "InputActionValue.h"
 #include "InteractableInterface.h"
 #include "Perception/AISightTargetInterface.h"
 #include "PlayerCharacter.generated.h"
@@ -14,13 +14,13 @@ class UInteractionComponent;
 class UBackpackComponent;
 class UPlayerAttributeSet;
 class UCameraComponent;
-class UInputMappingContext; // 추가
-class UInputAction; // 추가
-class UGameplayAbility; // 클래스 전방 선언 목록에 추가
-class UGameplayEffect; // ← 이 줄 추가
+class UInputMappingContext;
+class UInputAction;
+class UGameplayAbility;
+class UGameplayEffect;
 struct FInputActionInstance;
 class UPlayerColorSet;
-class UNoiseEmitterComponent;   // 추가
+class UNoiseEmitterComponent;
 
 
 UCLASS()

@@ -6,8 +6,8 @@
 #include "Camera/CameraComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/CapsuleComponent.h"
-#include "EnhancedInputComponent.h"       // 추가
-#include "EnhancedInputSubsystems.h"      // 추가
+#include "EnhancedInputComponent.h"
+#include "EnhancedInputSubsystems.h"
 #include "Abilities/GameplayAbility.h"
 #include "GameplayTagContainer.h"
 #include "Systems/Interaction/InteractionComponent.h"
@@ -47,7 +47,7 @@ APlayerCharacter::APlayerCharacter()
 void APlayerCharacter::BeginPlay()
 {
 	Super::BeginPlay();
-	DefaultCapsuleHalfHeight = GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight(); // 추가
+	DefaultCapsuleHalfHeight = GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
 
 	// BP에서 설정된 실제 카메라 위치를 캐싱 (부활 시 복원용)
 	if (FirstPersonCamera)
@@ -249,7 +249,7 @@ void APlayerCharacter::InitAbilityActorInfo()
 		AbilitySystemComponent->GetGameplayAttributeValueChangeDelegate(AttributeSet->GetHealthAttribute()).AddUObject(
 			this, &APlayerCharacter::OnHealthChanged);
 
-		GrantAbilities(); // 추가
+		GrantAbilities();
 	}
 }
 
@@ -978,7 +978,7 @@ void APlayerCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(APlayerCharacter, bIsDowned);
-	DOREPLIFETIME(APlayerCharacter, bIsDead); // 추가
+	DOREPLIFETIME(APlayerCharacter, bIsDead);
 	DOREPLIFETIME(APlayerCharacter, bIsReviving);
 	DOREPLIFETIME(APlayerCharacter, ColorIndex);
 }

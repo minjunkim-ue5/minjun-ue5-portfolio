@@ -14,7 +14,7 @@ UPlayerAttributeSet::UPlayerAttributeSet()
 	InitMaxHealth(100.f);
 	InitStamina(100.f);
 	InitMaxStamina(100.f);
-	InitMoveSpeed(300.f);   // 추가
+	InitMoveSpeed(300.f);
 }
 
 void UPlayerAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -80,7 +80,7 @@ void UPlayerAttributeSet::PostGameplayEffectExecute(const FGameplayEffectModCall
 	}
 	else if (Data.EvaluatedData.Attribute == GetMoveSpeedAttribute())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("MoveSpeed Changed"));   // 추가
+		UE_LOG(LogTemp, Warning, TEXT("MoveSpeed Changed"));
 
 		// 서버(그리고 리슨서버 호스트)에서 즉시 반영
 		if (UAbilitySystemComponent* ASC = GetOwningAbilitySystemComponent())
