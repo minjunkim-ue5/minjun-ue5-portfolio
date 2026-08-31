@@ -27,9 +27,10 @@ Unreal Engine 5 / C++ 팀 프로젝트에서 본인이 직접 작성한 소스�
 
 ### 설계 메모
 
-- ASC는 `PlayerCharacter`에 배치했습니다. 본 게임은 다운 → 부활로 상태만 전이하고 액터가 파괴·리스폰되지 않으므로, PlayerState 배치의 주 이점인 리스폰 시 어트리뷰트 유지가 적용되지 않는다고 판단했습니다.
+- **ASC와 AttributeSet은 `PlayerState`에 배치**하고, `PlayerCharacter`는 이를 캐시해 사용합니다. 캐릭터 액터의 생명주기와 무관하게 어트리뷰트가 유지되는 구조입니다.
+- **초기화는 서버·클라이언트 양쪽에서 각각 수행**합니다. 서버는 `PossessedBy()`, 클라이언트는 `OnRep_PlayerState()` 에서 `InitAbilityActorInfo()` 를 호출합니다. 클라이언트에서는 PlayerState가 복제되어 도착하는 시점이 늦기 때문에, 한쪽만 처리하면 클라이언트에서 어빌리티가 동작하지 않습니다.
+- `InitAbilityActorInfo(PS, this)` — **Owner는 PlayerState, Avatar는 Character** 로 분리해 전달합니다.
 - 로직·상태는 C++/GAS, 데이터·연출은 DataAsset/Blueprint로 경계를 나눴습니다. `State.Downed` 태그 하나로 Sprint · Jump · Interact 어빌리티가 일괄 차단됩니다.
-
 ### 주요 파일
 
 | 파일 | 설명 |
