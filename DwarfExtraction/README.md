@@ -1,10 +1,4 @@
-# 김민준 — Game Programmer Portfolio (Source Code)
-
-Unreal Engine 5 / C++ 팀 프로젝트에서 본인이 직접 작성한 소스코드를 발췌한 저장소입니다.
-
-> 팀 프로젝트 특성상 에셋(.uasset, .umap), 상용 마켓플레이스 에셋, 팀원이 작성한 코드는 저작권 및 라이선스 문제로 제외했습니다. 따라서 이 저장소는 빌드용이 아닌 **코드 열람용**입니다.
-
-## Project_Dwarf_Extraction
+# Project_Dwarf_Extraction
 
 4인 협동 1인칭 호러 게임 (Lethal Company 스타일)
 
@@ -17,7 +11,10 @@ Unreal Engine 5 / C++ 팀 프로젝트에서 본인이 직접 작성한 소스�
 | 기여 | 커밋 52회 / C++ 약 4,700줄 작성 |
 | 기술 | GAS, Enhanced Input, Replication(Server RPC / Multicast / OnRep) |
 
-### 구현
+> 이 폴더는 발췌본입니다. 팀 저장소에서 제가 작성한 `.h` / `.cpp` 만 옮겨 담았으며,
+> 에셋과 다른 파트 코드는 포함하지 않아 단독 빌드되지 않습니다.
+
+## 구현
 
 - **다운 / 부활 시스템** — 체력 0 시 다운 진입 → 팀원이 3초 홀드로 부활 → 미부활 시 사망
 - **상호작용 시스템** — `IInteractableInterface` 기반. 아이템 · 문 · 다운된 플레이어가 동일한 입력 하나로 동작
@@ -25,13 +22,13 @@ Unreal Engine 5 / C++ 팀 프로젝트에서 본인이 직접 작성한 소스�
 - **캐릭터 색상 커스터마이징** — `PlayerColorSet` DataAsset + Server RPC + `OnRep` 복제
 - **관전 시스템** — 사망 시 `PlayerSpectatorPawn` 전환, 생존 팀원 순환 관전
 
-### 설계 메모
+## 설계 메모
 
 - **ASC와 AttributeSet은 `PlayerState`에 배치**하고, `PlayerCharacter`는 이를 캐시해 사용합니다. 캐릭터 액터의 생명주기와 무관하게 어트리뷰트가 유지되는 구조입니다.
 - **초기화는 서버·클라이언트 양쪽에서 각각 수행**합니다. 서버는 `PossessedBy()`, 클라이언트는 `OnRep_PlayerState()` 에서 `InitAbilityActorInfo()` 를 호출합니다. 클라이언트에서는 PlayerState가 복제되어 도착하는 시점이 늦기 때문에, 한쪽만 처리하면 클라이언트에서 어빌리티가 동작하지 않습니다.
 - `InitAbilityActorInfo(PS, this)` — **Owner는 PlayerState, Avatar는 Character** 로 분리해 전달합니다.
 - 로직·상태는 C++/GAS, 데이터·연출은 DataAsset/Blueprint로 경계를 나눴습니다. `State.Downed` 태그 하나로 Sprint · Jump · Interact 어빌리티가 일괄 차단됩니다.
-### 주요 파일
+## 주요 파일
 
 | 파일 | 설명 |
 |---|---|
@@ -57,3 +54,7 @@ Unreal Engine 5 / C++ 팀 프로젝트에서 본인이 직접 작성한 소스�
 2번은 `ECC_Visibility`와 `ECC_Pawn` 두 채널을 동시에 트레이스해 로그를 비교하는 임시 진단 코드로 원인을 확정했습니다. 채널 변경 후에는 팀원 파트인 아이템 획득의 회귀 테스트를 거쳐 반영했습니다.
 
 이후 색상 커스터마이징과 피격 리액션 구현 시에는 같은 유형의 버그가 발생하지 않았습니다.
+
+---
+
+[← 저장소 메인으로](../)
