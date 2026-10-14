@@ -24,6 +24,7 @@
 #include "Noise/NoiseTypes.h"            // FNoiseModifier — 카트 적재 중 감쇄에 쓴다
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "PhysicsEngine/BodyInstance.h"
+#include "PhysicsEngine/PhysicsHandleComponent.h"
 
 // 노획물 액터와 하위 컴포넌트가 같은 카테고리로 찍는다. 선언은 Loot/LootLog.h.
 DEFINE_LOG_CATEGORY(LogLoot);
@@ -38,6 +39,9 @@ namespace LootCollisionProfiles
 
 	/** 중량형 소지 중 — 물리 OFF(Kinematic), 채널 응답은 Carried 와 동일 */
 	static const FName CarriedHeavy(TEXT("CarriedHeavyLoot"));
+
+	/** 막 놓거나 던진 직후 — Simulating 과 같고 사람만 Ignore */
+	static const FName Released(TEXT("ReleasedLoot"));
 }
 
 /**
@@ -113,6 +117,15 @@ ALootBase::ALootBase()
 	// 충돌 소음. 붙이는 것 외에 해 줄 것이 없다 — 히트 바인딩도 서버 판정도 스스로 한다.
 	// ImpactComponentName 을 비워 두면 루트를 쓰는데, 루트가 곧 LootMesh 라 그대로 맞는다.
 	NoiseEmitter = CreateDefaultSubobject<UNoiseEmitterComponent>(TEXT("NoiseEmitter"));
+
+	// 중량형 전용. 붙잡을 게 없으면 그냥 놀고 있는 컴포넌트라 일반 노획물에도 달아 둬도 무해하다.
+	HeavyCarryHandle = CreateDefaultSubobject<UPhysicsHandleComponent>(TEXT("HeavyCarryHandle"));
+
+	// 각도를 소프트 스프링으로 두면 운반자와의 접촉 등 외부 토크가 걸릴 때 목표 회전을
+	// 못 이기고 밀려서 물건이 팽이처럼 돈다. 하드 컨스트레인트로 바꿔 목표 회전을
+	// 그대로 따라가게 고정한다. 위치(Linear)는 그대로 소프트 스프링을 유지해
+	// 이동 자체는 부드럽게 따라오게 둔다.
+	HeavyCarryHandle->bSoftAngularConstraint = false;
 }
 
 void ALootBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -1087,16 +1100,35 @@ void ALootBase::ApplyCarryState()
 		// 어태치된 채로는 물리가 돌지 않는다. 반드시 먼저 떼어낸다.
 		DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 
-		LootMesh->SetCollisionProfileName(LootCollisionProfiles::Simulating);
+		// 사람 손에서 놓인 것이면 잠깐 사람을 통과시킨다. 레벨에 배치된 노획물이
+		// BeginPlay 로 여기 들어올 때는 이전 운반자가 없으므로 해당되지 않는다.
+		//
+		// 프로파일을 처음부터 이것으로 켜는 것이 중요하다. 물리가 켜지는 첫 프레임에
+		// 이미 몸과 겹쳐 있고, 문제가 나는 것이 정확히 그 프레임이다.
+		// Simulating 으로 켰다가 나중에 바꾸면 늦는다.
+		const bool bIgnorePawnOnRelease =
+			IsValid(PreviousCarrier) && ReleaseIgnorePawnSeconds > 0.f;
+
+		LootMesh->SetCollisionProfileName(bIgnorePawnOnRelease
+			? LootCollisionProfiles::Released
+			: LootCollisionProfiles::Simulating);
 
 		// 물리를 켜기 전에 몸 밖으로 빼낸다. 순서가 바뀌면 소용없다.
 		// 위치 보정은 서버가 정하고 클라이언트는 복제로 받는다.
+		//
+		// 통과 구간이 있어도 이건 그대로 둔다. 겹친 자리에서 그냥 놓으면 통과 구간이
+		// 끝나는 순간 몸 안에서 다시 밀려나므로, 빼낼 수 있으면 빼내는 편이 낫다.
 		if (HasAuthority())
 		{
 			ResolveReleaseOverlap(PreviousCarrier);
 		}
 
 		LootMesh->SetSimulatePhysics(true);
+
+		if (bIgnorePawnOnRelease)
+		{
+			BeginReleaseIgnorePawn();
+		}
 
 		// 임펄스는 물리를 켠 뒤에야 먹는다.
 		// 던지기는 OnThrown 이 직접 훨씬 큰 임펄스를 주므로 여기서는 건드리지 않는다.
@@ -1293,6 +1325,42 @@ void ALootBase::ApplyDropImpulse(const APawn* Carrier)
 	}
 }
 
+void ALootBase::BeginReleaseIgnorePawn()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// 구간 중에 다시 놓이면(집었다 바로 버리기) 여기로 다시 온다. SetTimer 가 같은 핸들을
+	// 덮어쓰므로 시간이 새로 시작된다. 이전 타이머가 남아 먼저 되돌리는 일은 없다.
+	World->GetTimerManager().SetTimer(
+		ReleaseIgnorePawnTimer, this, &ALootBase::EndReleaseIgnorePawn,
+		ReleaseIgnorePawnSeconds, /*bLoop=*/false);
+}
+
+void ALootBase::EndReleaseIgnorePawn()
+{
+	if (!IsValid(LootMesh))
+	{
+		return;
+	}
+
+	// 구간이 끝나기 전에 누가 집어 갔으면 아무것도 하지 않는다.
+	// 여기서 되돌리면 소지 중 프로파일(CarriedLoot)을 덮어써서 운반자가 자기 물건에 막힌다.
+	//
+	// 카트는 확인하지 않는다. AHandCart 는 실린 노획물의 프로파일을 건드리지 않으므로
+	// 적재 중에도 Simulating 이 맞는 값이고, 여기서 걸러 버리면 통과 구간에 카트로
+	// 들어간 물건이 되돌아올 계기를 영영 잃는다.
+	if (IsValid(PrimaryCarrier.Get()))
+	{
+		return;
+	}
+
+	LootMesh->SetCollisionProfileName(LootCollisionProfiles::Simulating);
+}
+
 void ALootBase::SetCarrierMoveIgnore(APawn* Carrier, bool bIgnore)
 {
 	if (!IsValid(Carrier))
@@ -1384,7 +1452,7 @@ void ALootBase::HandleMeshHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 	// 카트 밖으로 쏟아지면 여기부터 다시 정상으로 돈다.
 	if (IsValid(ContainingCart))
 	{
-		ShowImpactDebug(
+		ShowRejectDebug(
 			FString::Printf(TEXT("기각(카트 적재 중) %.0f"), ImpulseMagnitude),
 			FColor::Cyan, Hit.ImpactPoint, ImpulseMagnitude);
 		return;
@@ -1396,7 +1464,7 @@ void ALootBase::HandleMeshHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 	// 실제 낙하·투척 충격이 아니므로 여기서 걸러낸다.
 	if (OtherActor == PrimaryCarrier.Get() || OtherActor == SecondaryCarrier.Get())
 	{
-		ShowImpactDebug(
+		ShowRejectDebug(
 			FString::Printf(TEXT("기각(운반자와 접촉) %.0f"), ImpulseMagnitude),
 			FColor::Cyan, Hit.ImpactPoint, ImpulseMagnitude);
 		return;
@@ -1406,7 +1474,7 @@ void ALootBase::HandleMeshHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 	// 구르거나 미세하게 재접촉하는 것까지 전부 OnHit 으로 온다.
 	if (ImpulseMagnitude < PhysicsData.ImpactReportThreshold)
 	{
-		ShowImpactDebug(
+		ShowRejectDebug(
 			FString::Printf(TEXT("기각(약함) %.0f < %.0f"),
 				ImpulseMagnitude, PhysicsData.ImpactReportThreshold),
 			FColor::Silver, Hit.ImpactPoint, ImpulseMagnitude);
@@ -1418,7 +1486,7 @@ void ALootBase::HandleMeshHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 	const float Now = World->GetTimeSeconds();
 	if (!TryConsumeImpactCooldown(OtherActor, Now))
 	{
-		ShowImpactDebug(
+		ShowRejectDebug(
 			FString::Printf(TEXT("기각(%.1f초 내 재충돌) %.0f"), ImpactDebounceSeconds, ImpulseMagnitude),
 			FColor::Orange, Hit.ImpactPoint, ImpulseMagnitude);
 		return;
@@ -1452,10 +1520,35 @@ void ALootBase::HandleMeshHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 	// 여기까지 온 것이 '확정 충격 1개'다.
 	// 아이템은 물리적 사실만 알린다 — 얼마나 시끄러운지는 판단하지 않는다.
 	//
-	// 델리게이트는 파손 컴포넌트가 듣고, BP 훅은 연출을 붙인다. 소음은 여기 없다 —
-	// UNoiseEmitterComponent 가 자기 경로로 따로 발행한다.
+	// 델리게이트는 파손 컴포넌트가 듣고, BP 훅은 연출을 붙인다. 일반 충돌 소음은
+	// 여기 없다 — UNoiseEmitterComponent 가 자기 경로로 따로 발행한다.
+	// (바로 아래 중량형 낙하만 예외다. 이유는 그쪽 주석에 적었다)
 	OnLootImpact.Broadcast(Event);
 	OnImpact(Event);
+
+	// [예외] 중량형 낙하만 소음을 여기서 직접 낸다.
+	//
+	// 위 주석대로 충돌 소음은 UNoiseEmitterComponent 가 자기 경로로 발행한다. 그런데
+	// 기획서 5장은 중량형 낙하를 '특대 · 전 구역' 으로 따로 정해 놓았고, 임펄스에 비례하는
+	// 보통 소리(Noise.Loot.Impact)로는 그 크기가 안 나온다. 저쪽은 '무거운 물건이
+	// 방금 손에서 떨어졌다' 는 맥락을 모르기 때문에 대신 판단해 줄 수도 없다.
+	//
+	// Cause 가 HeavyDrop 인 것은 놓기 때 예약된 원인이 이 확정 충격에서 소비됐다는 뜻이다.
+	// 즉 '중량형을 놓은 뒤 바닥에 닿는 첫 충격' 이고, 그 순간이 정확히 여기다.
+	// 살짝 내려놓아 임펄스가 ImpactReportThreshold 미만이면 여기까지 오지 못하고,
+	// 예약은 남아 있다가 다음 진짜 충격에서 소비된다.
+	if (Event.Cause == ELootImpactCause::HeavyDrop)
+	{
+		if (UNoiseEmitterComponent* Noise = GetNoiseEmitter())
+		{
+			// 크기는 임펄스에서 뽑는다 — 얼마나 세게 떨어졌는지는 물리적 사실이라
+			// 내가 알려 주는 것이 맞다. 그게 몇 % 의 경계도가 되는지는 여기서 정하지 않는다.
+			const float Loudness = FMath::Clamp(
+				ImpulseMagnitude / FMath::Max(PhysicsData.HeavyDropLoudImpulse, 1.f), 0.f, 1.f);
+
+			Noise->ReportTaggedNoise(HHTags::Noise_Loot_HeavyDrop, Loudness);
+		}
+	}
 
 	// 낙하 1회에 OnHit 5~15회가 확정 1회로 묶이는지를 이 비율로 확인한다.
 	++DebugConfirmedCount;
@@ -1698,6 +1791,19 @@ void ALootBase::ShowImpactDebug(const FString& Message, const FColor& Color, con
 	// 어디에 부딪혔는지가 기각 사유를 읽는 데 필요하다 (바닥인지 벽인지 다른 물건인지).
 	DrawDebugSphere(GetWorld(), Location, 12.f, 8, Color, false, 2.f);
 #endif
+}
+
+void ALootBase::ShowRejectDebug(const FString& Message, const FColor& Color, const FVector& Location,
+	float FilterImpulse) const
+{
+	// 기각은 확정보다 훨씬 자주 나온다. 중량형에 몸이 닿아 있기만 해도 임계값 미만의
+	// 접촉이 매 프레임 들어오는데, 그게 다 찍히면 확정 한 줄이 화면 밖으로 밀려난다.
+	if (!bShowRejectedImpacts)
+	{
+		return;
+	}
+
+	ShowImpactDebug(Message, Color, Location, FilterImpulse);
 }
 
 bool ALootBase::TryConsumeImpactCooldown(const AActor* OtherActor, float Now)

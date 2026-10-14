@@ -18,6 +18,9 @@ namespace
 {
 	/** 물리 시뮬레이션 중. 노획물과 같은 프로파일을 쓴다 — 던진 장비도 물건처럼 굴러야 한다 */
 	static const FName EquipmentSimulatingProfile(TEXT("Loot"));
+
+	/** 막 놓거나 던진 직후 — 위와 같고 사람만 Ignore. 노획물과 같은 프로파일을 쓴다 */
+	static const FName EquipmentReleasedProfile(TEXT("ReleasedLoot"));
 }
 
 AEquipmentBase::AEquipmentBase()
@@ -30,6 +33,12 @@ AEquipmentBase::AEquipmentBase()
 	EquipmentMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EquipmentMesh"));
 	SetRootComponent(EquipmentMesh);
 
+	// 장비는 예외 없이 움직인다 — 집히고, 던져지고, 물리로 구른다.
+	// Static 이면 **집기가 조용히 실패한다**: 손 소켓에 AttachToComponent 하는 순간
+	// 엔진이 "Static 을 Movable 부모에 붙일 수 없다" 며 거부하고, SetSimulatePhysics 도 무시된다.
+	// 트레이스는 멀쩡히 맞으므로 겉보기로는 "E 를 눌러도 아무 일이 없다" 로만 드러난다.
+	// (2026-09-18 BP_Drone 이 Static 으로 저장돼 있어 반나절 걸렸다)
+	EquipmentMesh->SetMobility(EComponentMobility::Movable);
 	EquipmentMesh->SetCollisionProfileName(EquipmentSimulatingProfile);
 	EquipmentMesh->SetSimulatePhysics(true);
 	EquipmentMesh->SetNotifyRigidBodyCollision(true);   // OnComponentHit 을 받으려면 필요하다
@@ -37,6 +46,19 @@ AEquipmentBase::AEquipmentBase()
 	// ALootBase 와 같은 이유로 생성자에서 붙인다. BP 마다 추가하는 방식이면 언젠가
 	// 빼먹고, 그 장비만 조용한데 경고도 없어서 발견이 아주 늦다.
 	NoiseEmitter = CreateDefaultSubobject<UNoiseEmitterComponent>(TEXT("NoiseEmitter"));
+
+	// [임시] E 로 집히게 하는 액터 태그.
+	//
+	//   UGAB_Interact::IsCarryableLoot 은 'Loot.Type' 하위 태그를 보고 집을 대상을 고른다.
+	//   장비는 그 태그를 달 수 없다 — 달면 AVanZone 이 노획물로 인식해 던져 둔 EMP 가
+	//   정산 화면에 뜬다. 그래서 저쪽이 남겨 둔 액터 태그 폴백('Item')을 쓴다.
+	//
+	//   BP 가 아니라 여기서 다는 이유는 NoiseEmitter 와 같다. 장비가 4종 더 늘어날 때
+	//   BP 마다 붙이는 방식이면 언젠가 빼먹고, 그 장비만 집히지 않는데 경고도 없다.
+	//
+	//   플레이어 파트에 'Equipment' 루트를 보는 판정을 요청해 두었다. 그게 들어오면
+	//   이 줄을 지운다 — 그때까지는 이것이 유일하게 동작하는 경로다.
+	Tags.Add(TEXT("Item"));
 }
 
 void AEquipmentBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -51,6 +73,17 @@ void AEquipmentBase::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// 클라이언트는 예측하지 않고 서버 스냅샷을 향해 속도 보간만 한다.
+	// ALootBase·AHandCart 가 같은 호출을 하고 있고 **장비만 빠져 있었다** —
+	// UE 5.4 에는 전역 ini 키가 없어서 물리 액터마다 직접 불러야 한다.
+	//
+	// 없으면 이렇게 어긋난다: 던질 때 ApplyCarryState 가 모든 머신에서 물리를 켜는데
+	// 발사 임펄스(HHThrow::Launch)는 서버에서만 돈다. 클라이언트 사본은 추진력 없이
+	// 제자리에 떨어지고, 보정이 없으니 그대로 남는다 — 2026-10-02 측정으로 4.75m 차이였다.
+	//
+	// (토글은 ALootBase 의 hh.Loot.PhysicsRepMode 에 있다. 그쪽은 노획물 전용이다)
+	SetPhysicsReplicationMode(EPhysicsReplicationMode::PredictiveInterpolation);
+
 	if (HasAuthority())
 	{
 		// 태그가 없으면 산 물건과 스폰된 물건을 이을 수 없다. 조용히 두면
@@ -62,6 +95,19 @@ void AEquipmentBase::BeginPlay()
 				*GetName());
 		}
 
+
+		// 생성자에서 Movable 로 맞춰 두지만, BP 가 Static 으로 저장돼 있으면 그 값이 이긴다.
+		// Static 이면 집기(Attach)도 물리도 조용히 실패하고 **경고 한 줄 없이** 안 집히는
+		// 물건이 된다 — 트레이스는 멀쩡히 맞아서 콜리전·태그를 의심하며 한참 헤매게 된다.
+		// 고칠 수 있는 자리에서 고치고 알린다.
+		if (EquipmentMesh->Mobility != EComponentMobility::Movable)
+		{
+			UE_LOG(LogLoot, Warning,
+				TEXT("[Equipment:%s] EquipmentMesh 의 Mobility 가 Movable 이 아니다 — 집기와 물리가 "
+					 "동작하지 않는다. 런타임에 Movable 로 바꿨지만 BP 에서도 고칠 것"),
+				*GetName());
+			EquipmentMesh->SetMobility(EComponentMobility::Movable);
+		}
 		EquipmentMesh->OnComponentHit.AddDynamic(this, &AEquipmentBase::HandleMeshHit);
 	}
 }
@@ -141,6 +187,11 @@ void AEquipmentBase::ApplyCarryState()
 {
 	const bool bCarried = IsValid(PrimaryCarrier);
 
+	// 놓인 순간을 구분하려고 직전 운반자를 들고 있는다. 그냥 PrimaryCarrier 가 비었는지만
+	// 보면 맵에 처음부터 놓여 있던 장비까지 '방금 놓였다' 로 취급된다.
+	APawn* const PreviousCarrier = AppliedCarrier.Get();
+	AppliedCarrier = PrimaryCarrier;
+
 	if (bCarried)
 	{
 		// PhysicsHandle 로 물리를 유지한 채 드는 방식은 멀티에서 깨진다.
@@ -199,8 +250,52 @@ void AEquipmentBase::ApplyCarryState()
 	}
 
 	DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
-	EquipmentMesh->SetCollisionProfileName(EquipmentSimulatingProfile);
+
+	// 던진 직후 잠깐 사람을 통과시킨다. 노획물(ALootBase::ReleaseIgnorePawnSeconds)과 같은
+	// 이유이고, 장비는 하나가 더 있다 — 점착 폭탄은 가장 먼저 닿는 것에 붙기 때문에
+	// 이게 없으면 던진 사람 몸에 붙는다. 자기 발밑에서 퓨즈가 도는 그림이 나온다.
+	const bool bIgnorePawnOnRelease =
+		IsValid(PreviousCarrier) && ReleaseIgnorePawnSeconds > 0.f;
+
+	EquipmentMesh->SetCollisionProfileName(bIgnorePawnOnRelease
+		? EquipmentReleasedProfile
+		: EquipmentSimulatingProfile);
+
 	EquipmentMesh->SetSimulatePhysics(true);
+
+	if (bIgnorePawnOnRelease)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().SetTimer(
+				ReleaseIgnorePawnTimer, this, &AEquipmentBase::EndReleaseIgnorePawn,
+				ReleaseIgnorePawnSeconds, /*bLoop=*/false);
+		}
+	}
+}
+
+void AEquipmentBase::EndReleaseIgnorePawn()
+{
+	if (!IsValid(EquipmentMesh))
+	{
+		return;
+	}
+
+	// 구간이 끝나기 전에 누가 집어 갔으면 콜리전이 꺼져 있다. 여기서 되돌리면 다시 켜진다.
+	if (IsValid(PrimaryCarrier))
+	{
+		return;
+	}
+
+	// 이미 어딘가에 붙었으면(Deployed 이후) 그 상태의 콜리전을 그대로 둔다.
+	if (State == EEquipmentState::Deployed
+		|| State == EEquipmentState::Active
+		|| State == EEquipmentState::Spent)
+	{
+		return;
+	}
+
+	EquipmentMesh->SetCollisionProfileName(EquipmentSimulatingProfile);
 }
 
 void AEquipmentBase::OnRep_PrimaryCarrier()
@@ -369,10 +464,62 @@ void AEquipmentBase::Activate()
 	{
 		World->GetTimerManager().SetTimer(EffectTimer, this,
 			&AEquipmentBase::Finish, EffectDuration, false);
+
+		// 발동한 뒤에도 계속 소리를 내는 장비가 있다 — 미끼가 그것이다.
+		// 이 소리가 경비의 InvestigateLocation 이 되어 경비를 끌어온다.
+		//
+		// EffectDuration 이 0 인 장비(폭탄)에는 걸지 않는다. Active 구간이 한 프레임도
+		// 없어서 타이머가 첫 발화 전에 Finish 에서 지워지고, 태그만 지정돼 있으면
+		// "왜 소리가 안 나지" 로 헷갈린다.
+		if (ActiveNoiseTag.IsValid())
+		{
+			EmitActiveNoise();
+
+			World->GetTimerManager().SetTimer(ActiveNoiseTimer, this,
+				&AEquipmentBase::EmitActiveNoise, ActiveNoiseInterval, /*bLoop=*/true);
+		}
 	}
 	else
 	{
 		Finish();
+	}
+}
+
+void AEquipmentBase::FinishEffectEarly()
+{
+	if (!HasAuthority() || State != EEquipmentState::Active)
+	{
+		return;
+	}
+
+	// 타이머를 먼저 지운다. 남겨 두면 Spent 가 된 뒤에 Finish 가 한 번 더 돌고,
+	// 그쪽은 State 검사로 조용히 빠져나가서 무해하지만 흔적이 남지 않아 헷갈린다.
+	GetWorldTimerManager().ClearTimer(EffectTimer);
+
+	Finish();
+}
+
+void AEquipmentBase::Multicast_SpentEffect_Implementation(FVector_NetQuantize Location)
+{
+	UWorld* World = GetWorld();
+
+	// 데디케이티드 서버는 화면도 스피커도 없다 (ApplyStateEffects 와 같은 사유)
+	if (!World || World->GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	// 액터에 붙이지 않는다. 붙였다가는 SpentDestroyDelay 뒤에 함께 사라진다.
+	if (IsValid(SpentEffect))
+	{
+		ConfigureEffect(UNiagaraFunctionLibrary::SpawnSystemAtLocation(World, SpentEffect,
+			Location, GetActorRotation(), FVector(1.f), /*bAutoDestroy=*/true),
+			EEquipmentState::Spent);
+	}
+
+	if (IsValid(SpentSound))
+	{
+		UGameplayStatics::PlaySoundAtLocation(World, SpentSound, Location);
 	}
 }
 
@@ -383,6 +530,9 @@ void AEquipmentBase::Finish()
 		return;
 	}
 
+	// 효과가 끝났으면 소리도 그친다. 미끼가 20초 뒤에도 계속 울면 경비가 영영 붙잡힌다.
+	GetWorldTimerManager().ClearTimer(ActiveNoiseTimer);
+
 	SetEquipmentState(EEquipmentState::Spent);
 	OnSpent();
 
@@ -391,6 +541,10 @@ void AEquipmentBase::Finish()
 	{
 		return;
 	}
+
+	// 끝나는 연출은 지금 전원에게 보낸다. 위치를 실어 보내는 것이 핵심이다 —
+	// 클라이언트의 이 액터는 서버보다 뒤처져 있어서, 각자 자기 위치에 띄우면 어긋난다.
+	Multicast_SpentEffect(GetActorLocation());
 
 	// 바로 Destroy 하면 액터가 복제보다 먼저 사라져 클라이언트에서는 연출 없이 증발한다.
 	if (SpentDestroyDelay > 0.f)
@@ -425,6 +579,24 @@ void AEquipmentBase::EmitDeployNoise()
 	{
 		// 권위 검사는 ReportTaggedNoise 안에 있다. 클라이언트에서 불려도 조용히 무시된다.
 		NoiseEmitter->ReportTaggedNoise(DeployNoiseTag);
+	}
+}
+
+void AEquipmentBase::EmitActiveNoise()
+{
+	// EmitDeployNoise 와 같은 이유의 검사다. 효과가 끝난 프레임에 타이머가 이미 큐에
+	// 들어가 있으면 ClearTimer 로는 못 막고 이 검사만 남는다.
+	if (State != EEquipmentState::Active)
+	{
+		return;
+	}
+
+	if (IsValid(NoiseEmitter) && ActiveNoiseTag.IsValid())
+	{
+		// NoiseEmitter 를 거치는 것이 중요하다. 소음 파트의 스팸 필터가 여기서 돌면서,
+		// 같은 자리에서 반복되는 소리의 경계도 기여를 알아서 깎는다.
+		// UNoiseSubsystem::ReportNoise 를 직접 부르면 그 판단을 건너뛰게 된다.
+		NoiseEmitter->ReportTaggedNoise(ActiveNoiseTag);
 	}
 }
 
@@ -494,9 +666,9 @@ void AEquipmentBase::ApplyStateEffects(EEquipmentState OldState)
 	case EEquipmentState::Deployed:
 		if (IsValid(DeployEffect))
 		{
-			UNiagaraFunctionLibrary::SpawnSystemAttached(DeployEffect, EquipmentMesh, NAME_None,
-				FVector::ZeroVector, FRotator::ZeroRotator,
-				EAttachLocation::SnapToTarget, /*bAutoDestroy=*/true);
+			ConfigureEffect(UNiagaraFunctionLibrary::SpawnSystemAttached(DeployEffect, EquipmentMesh,
+				NAME_None, FVector::ZeroVector, FRotator::ZeroRotator,
+				EAttachLocation::SnapToTarget, /*bAutoDestroy=*/true), State);
 		}
 		if (IsValid(DeploySound))
 		{
@@ -523,6 +695,7 @@ void AEquipmentBase::ApplyStateEffects(EEquipmentState OldState)
 				ActiveEffect, EquipmentMesh, NAME_None,
 				FVector::ZeroVector, FRotator::ZeroRotator,
 				EAttachLocation::SnapToTarget, /*bAutoDestroy=*/false);
+			ConfigureEffect(ActiveEffectComponent, State);
 		}
 		break;
 
@@ -538,17 +711,9 @@ void AEquipmentBase::ApplyStateEffects(EEquipmentState OldState)
 		}
 
 
-		// 액터는 곧 사라지므로 붙이지 않고 월드에 스폰한다.
-		// 붙였다가는 SpentDestroyDelay 뒤에 폭발 이펙트가 함께 사라진다.
-		if (IsValid(SpentEffect))
-		{
-			UNiagaraFunctionLibrary::SpawnSystemAtLocation(World, SpentEffect,
-				GetActorLocation(), GetActorRotation(), FVector(1.f), /*bAutoDestroy=*/true);
-		}
-		if (IsValid(SpentSound))
-		{
-			UGameplayStatics::PlaySoundAtLocation(World, SpentSound, GetActorLocation());
-		}
+		// 끝나는 순간의 연출은 여기서 띄우지 않는다 — Finish() 가 Multicast 로 내려보낸다.
+		// 이 액터는 곧 자기를 파괴해서, 상태 복제를 기다리면 클라이언트가 놓친다
+		// (Multicast_SpentEffect 주석에 측정값과 함께 적어 두었다).
 		break;
 
 	default:
@@ -560,7 +725,7 @@ void AEquipmentBase::ApplyStateEffects(EEquipmentState OldState)
 // [임시] 콘솔 명령
 //
 // UGAB_Interact 의 집기 판정이 'Loot.Type' 태그만 보기 때문에 장비는 아직 집히지
-// 않는다. 플레이어 파트에서 'Equipment' 루트 판정을 넣어 주면 이 블록을 지운다.
+// 않는다. 전영배 님이 'Equipment' 루트 판정을 넣어 주시면 이 블록을 지운다.
 // 그때까지 던지기·붙기·퓨즈·폭발을 검증할 유일한 경로다.
 // (카트의 hh.Cart.TogglePush 와 같은 자리의 임시 코드다)
 // --------------------------------------------------------------------------

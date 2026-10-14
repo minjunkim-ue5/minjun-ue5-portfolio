@@ -131,18 +131,24 @@ protected:
 	virtual void BeginPlay() override;
 
 	/**
-	 * 자리를 잡았다. 붙었거나 바닥에 닿았다. (모든 머신)
+	 * 자리를 잡았다. 붙었거나 바닥에 닿았다. **(서버 전용)**
 	 * 서브클래스가 여기서 '준비' 를 한다 — 폭탄이라면 퓨즈 소리를 낸다.
 	 */
 	virtual void OnDeployed(const FHitResult& Hit);
 
 	/**
-	 * 효과가 발동했다. (모든 머신)
-	 * 실제 효과는 **서버에서만** 적용할 것. 여기는 모든 머신에서 불린다.
+	 * 효과가 발동했다. **(서버 전용)**
+	 *
+	 * ⚠ 아래 세 훅은 Deploy / Activate / Finish 에서만 불리고 그 셋은 전부 서버 전용이다.
+	 * 클라이언트의 OnRep_State 는 ApplyStateEffects(연출)만 실행한다 —
+	 * 2026-09-11 까지 이 주석이 "(모든 머신)" 이라고 잘못 적혀 있었다.
+	 *
+	 * 그래서 **클라이언트에서 무언가를 해야 하는 장비는 자기 상태를 따로 복제해야 한다.**
+	 * ADrone 이 bFlightActive 를 복제해 조종사의 화면에서 시점을 가져가는 것이 그 예다.
 	 */
 	virtual void OnActivated();
 
-	/** 효과가 끝났다. (모든 머신) */
+	/** 효과가 끝났다. **(서버 전용 — OnActivated 주석을 볼 것)** */
 	virtual void OnSpent();
 
 	/** BP 확장점. C++ 가상 함수로 부족할 때만 쓴다 */
@@ -181,6 +187,22 @@ protected:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Equipment|Carry")
 	FName CarrySocketName = TEXT("Hand_R_Socket");
+
+	/**
+	 * 놓거나 던진 뒤 이 시간(초) 동안 사람과의 물리 충돌을 무시한다. 0 이면 끈다.
+	 *
+	 * 소지 중에는 장비가 운반자 몸 안에 있다. 놓는 순간 물리를 켜면 그 침투를 물리 엔진이
+	 * 밀어내면서 던진 것이 손에서 튕기고 궤도가 어긋난다. (ALootBase 쪽과 같은 문제다)
+	 *
+	 * [장비에는 이유가 하나 더 있다]
+	 *   bAttachOnImpact 인 장비는 가장 먼저 닿는 것에 붙는다. 이게 없으면 던진 사람
+	 *   몸에 붙어서, 자기 발밑에서 퓨즈가 도는 그림이 나온다.
+	 *
+	 * 경비(Guard 채널)는 계속 Block 이라 던져 맞히거나 붙이는 것은 그대로 된다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Equipment|Carry",
+		meta = (ClampMin = "0.0", ClampMax = "2.0", Units = "s"))
+	float ReleaseIgnorePawnSeconds = 0.3f;
 
 	// ---- 자리잡기 · 발동 ----
 
@@ -244,14 +266,11 @@ protected:
 	 *
 	 *   ⚠️ 폭파 진행용 태그가 아직 없다. Noise.Device.SafeCut 이 수치상 맞지만
 	 *   (특대 지속 / +3%/초 / 전 구역) 이름이 '절단' 이라 지금 설계와 어긋난다.
-	 *   소음 파트에 태그를 요청해 두었고, 정해지면 BP 에서 지정한다.
+	 *   지성인 님께 태그를 요청해 두었고, 정해지면 BP 에서 지정한다.
 	 *
-	 * [Active 구간에는 아직 같은 슬롯이 없다]
-	 *   미끼는 발동한 뒤 20초 동안 시끄러워야 하므로(Noise.Equipment.Decoy) 이 훅으로는
-	 *   안 된다 — 여기는 Deployed 구간, 즉 '자리는 잡았지만 아직 발동 전' 이다.
-	 *   미끼를 만들 때 ActiveNoiseTag 를 대칭으로 붙인다. 지금 미리 파지 않는 것은
-	 *   그 20초를 EffectDuration 으로 둘지가 아직 안 정해져서, 추측으로 만든 슬롯이
-	 *   정작 그때 안 맞을 가능성이 높기 때문이다.
+	 * [Active 구간은 ActiveNoiseTag 가 맡는다]
+	 *   여기는 Deployed, 즉 '자리는 잡았지만 아직 발동 전' 이다.
+	 *   발동한 뒤에 나는 소리는 아래 ActiveNoiseTag 로 간다. (2026-09-08 미끼 작업에서 추가)
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Equipment|Noise")
 	FGameplayTag DeployNoiseTag;
@@ -265,6 +284,36 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Equipment|Noise",
 		meta = (ClampMin = "0.05", Units = "s"))
 	float DeployNoiseInterval = 1.f;
+
+	/**
+	 * 발동한 뒤(Active) 주기적으로 발행할 소음 태그. DeployNoiseTag 와 대칭이다.
+	 *
+	 * 미끼가 이것으로 동작한다 — 20초(EffectDuration) 동안 Noise.Equipment.Decoy 를 계속 내면,
+	 * 소음이 UAISense_Hearing 을 거쳐 경비의 InvestigateLocation 이 되어 경비가 그리로 온다.
+	 * "이리 와라" 같은 AI 호출 경로는 만들지 않는다 — 소음 시스템을 우회하는 두 번째 길이 생긴다.
+	 *
+	 * 비워 두면 아무것도 발행하지 않는다. 점착 폭탄처럼 EffectDuration 이 0 인 장비는
+	 * Active 구간 자체가 한 프레임도 없으므로 지정해도 의미가 없다.
+	 *
+	 * [경계도 억제를 여기서 하지 않는다]
+	 *   "경비는 부르되 경계도는 덜 올린다" 를 AlertScale 로 넘기고 싶어지지만 그러면 안 된다.
+	 *   AlertScale 은 소음 파트의 스팸 필터가 계산해 넘기는 값이고(NoiseSpamFilter.cpp),
+	 *   같은 자리에서 반복되는 소음의 기여를 자동으로 깎는 것이 그쪽 일이다.
+	 *   미끼의 20초 반복이 정확히 그 상황이라 손대면 오히려 망가진다.
+	 *   경계도를 몇 % 올릴지는 DT_NoiseProfiles 의 AlertDelta 가 정한다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Equipment|Noise")
+	FGameplayTag ActiveNoiseTag;
+
+	/**
+	 * ActiveNoiseTag 를 몇 초마다 발행할지. 짧을수록 경비를 강하게 끈다.
+	 *
+	 * 미끼의 유인력을 조절하는 값이 이것이다. 너무 짧게 잡아도 소음 파트의 쿨다운
+	 * (FNoiseProfileRow::CooldownSeconds)에 걸려 그대로 나가지는 않고, 걸러지는 호출만 늘어난다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Equipment|Noise",
+		meta = (ClampMin = "0.05", Units = "s"))
+	float ActiveNoiseInterval = 1.f;
 
 	// ---- 연출 (BP 는 에셋만 고른다) ----
 
@@ -316,6 +365,14 @@ protected:
 	/** 지금 상태를 바꾼다. 서버 전용이고, 값이 실제로 달라졌을 때만 일한다 */
 	void SetEquipmentState(EEquipmentState NewState);
 
+	/**
+	 * 효과를 예정보다 일찍 끝낸다. EffectDuration 타이머를 지우고 Spent 로 넘어간다. (서버 전용)
+	 *
+	 * 드론이 이걸 쓴다 — 준비 시간이 끝나면 남은 시간과 무관하게 조종을 끊어야 한다.
+	 * Active 가 아니면 아무 일도 하지 않는다.
+	 */
+	void FinishEffectEarly();
+
 private:
 	UFUNCTION()
 	void HandleMeshHit(UPrimitiveComponent* HitComponent, AActor* OtherActor,
@@ -335,6 +392,9 @@ private:
 	/** DeployNoiseTag 를 한 번 발행한다. Deployed 인 동안 타이머가 반복해서 부른다 (서버 전용) */
 	void EmitDeployNoise();
 
+	/** ActiveNoiseTag 를 한 번 발행한다. Active 인 동안 타이머가 반복해서 부른다 (서버 전용) */
+	void EmitActiveNoise();
+
 	/**
 	 * 퓨즈 경고음을 끈다.
 	 *
@@ -346,8 +406,50 @@ private:
 	/** 소지 상태에 맞춰 물리·콜리전·부착을 정리한다. 모든 머신에서 실행된다 */
 	void ApplyCarryState();
 
+	/**
+	 * 놓기·던지기 직후의 사람 통과 구간을 끝낸다.
+	 *
+	 * 구간이 끝나기 전에 다시 집혔거나 이미 어딘가에 붙었으면 아무것도 하지 않는다 —
+	 * 그때 되돌리면 그 상태의 콜리전을 덮어쓴다.
+	 */
+	void EndReleaseIgnorePawn();
+
 	/** 상태에 맞는 연출을 켜고 끈다. 모든 머신에서 실행된다 */
 	void ApplyStateEffects(EEquipmentState OldState);
+
+	/**
+	 * 끝나는 순간의 연출(SpentEffect · SpentSound)을 전원에게 내려보낸다. 위치는 서버 값이다.
+	 *
+	 * [왜 복제 상태에 맡기지 않는가] — 2026-10-02 실측으로 바꿨다
+	 *   원래는 State 가 Spent 로 복제되면 각 머신이 ApplyStateEffects 에서 띄웠다. 그런데
+	 *   이 장비는 Spent 가 되고 SpentDestroyDelay 뒤에 자기를 파괴한다 — 그 사이에 상태가
+	 *   못 나가면 클라이언트는 연출을 영영 못 본다. 실제로 복제가 1.8초씩 밀리던 상황에서
+	 *   **호스트가 던지면 보이고 클라이언트가 던지면 안 보이는** 증상으로 나타났다.
+	 *
+	 *   위치를 인자로 싣는 이유도 같은 측정에서 나왔다. 클라이언트의 액터 위치가 서버보다
+	 *   4.75m 뒤처져 있어서, 각자 자기 위치에 띄우면 **엉뚱한 자리에서 터진다.**
+	 *
+	 *   Reliable 인 것은 장비 하나당 한 번만 나가는 이벤트이기 때문이다. 놓치면 플레이어가
+	 *   $10,000 짜리 물건이 작동했는지 알 방법이 없다 — 연출이지만 버려도 되는 연출은 아니다.
+	 */
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_SpentEffect(FVector_NetQuantize Location);
+
+	/**
+	 * 방금 스폰한 나이아가라에 값을 넘긴다. 서브클래스가 덮어쓴다.
+	 * **모든 머신에서 불린다** — ApplyStateEffects 안이라 서버 전용이 아니다.
+	 *
+	 * [왜 필요한가]
+	 *   이펙트의 크기가 게임 수치와 같아야 하는 장비가 있다. EMP 의 펄스 구가 그렇다 —
+	 *   나이아가라에 반경을 숫자로 박아 두면, 나중에 PulseRadius 를 바꿨을 때
+	 *   **보이는 구와 실제로 꺼지는 범위가 조용히 어긋난다.** 그때 "분명 닿았는데 안 꺼진다"
+	 *   로 나타나고, 원인을 찾기 어렵다.
+	 *   ASecurityCamera 가 VisionCone 을 DetectionRange 로 강제 동기화하는 것과 같은 이유다.
+	 *
+	 *   값은 나이아가라의 User 파라미터로 넘긴다 (Effect->SetFloatParameter("Radius", ...)).
+	 *   복제하지 않아도 되는 것은 이 값들이 BP 기본값이라 모든 머신이 같은 값을 갖기 때문이다.
+	 */
+	virtual void ConfigureEffect(class UNiagaraComponent* Effect, EEquipmentState ForState) {}
 
 	UFUNCTION()
 	void OnRep_State(EEquipmentState OldState);
@@ -369,8 +471,18 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<class UAudioComponent> DeployLoopComponent;
 
+	/**
+	 * 직전에 반영해 둔 운반자. '방금 놓였다' 를 구분하는 데만 쓴다.
+	 * PrimaryCarrier 가 비었는지만 보면 맵에 처음부터 놓여 있던 장비까지 걸린다.
+	 */
+	TWeakObjectPtr<APawn> AppliedCarrier;
+
 	FTimerHandle ActivationTimer;
 	FTimerHandle EffectTimer;
 	FTimerHandle DestroyTimer;
 	FTimerHandle DeployNoiseTimer;
+	FTimerHandle ActiveNoiseTimer;
+
+	/** 사람 통과 구간의 타이머. 액터가 먼저 사라지면 타이머 매니저가 스스로 정리한다 */
+	FTimerHandle ReleaseIgnorePawnTimer;
 };

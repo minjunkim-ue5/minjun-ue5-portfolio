@@ -11,6 +11,7 @@
 #include "Net/UnrealNetwork.h"
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
+#include "Noise/NoiseEmitterComponent.h" // 유출 소음 — 충돌이 아니라 내 판정으로 나간다
 
 void ULootStabilityComponent::ResolveData()
 {
@@ -253,8 +254,16 @@ void ULootStabilityComponent::Spill(float TiltDegrees)
 	// 서버에서 값을 직접 바꾸면 RepNotify 가 불리지 않는다. 서버 몫은 손으로 부른다.
 	OnRep_SpillCount();
 
-	// TODO(소음 연동): develop 머지 후 UNoiseEmitterComponent 로 Noise.Loot.Spill 발행.
-	//   충돌이 아닌 경로이므로 ReportTaggedNoise 를 직접 부른다.
+	// 유출은 물리 충돌이 아니라 기울기 판정으로 나는 사건이라, 소음 컴포넌트가 스스로
+	// 알 방법이 없다. 여기서 직접 알려 준다.
+	//
+	// 이 함수는 기울어져 있는 동안 주기적으로 다시 불린다. 부를 때마다 발행하지만
+	// 연속으로 시끄러워지지는 않는다 — DT_NoiseProfiles 의 Noise.Loot.Spill 행에 있는
+	// CooldownSeconds 로 소음 파트의 스팸 필터가 묶어 준다. (내 쪽에서 또 막으면 두 벌이 된다)
+	if (UNoiseEmitterComponent* Noise = OwnerLoot->GetNoiseEmitter())
+	{
+		Noise->ReportTaggedNoise(HHTags::Noise_Loot_Spill, 1.f);
+	}
 
 	if (OwnerLoot->IsImpactDebugEnabled() && GEngine)
 	{

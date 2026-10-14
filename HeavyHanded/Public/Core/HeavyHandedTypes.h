@@ -130,6 +130,24 @@ struct FLootPhysicsData
 		meta = (ClampMin = "0.0"))
 	float ImpactReportThreshold = 200.f;
 
+	/**
+	 * 중량형 낙하 소음(Noise.Loot.HeavyDrop)이 최대 크기가 되는 충격량.
+	 * Loudness = Clamp(임펄스 / 이 값, 0, 1) 로 넘긴다.
+	 *
+	 * 살살 내려놓으면 작게, 쿵 떨어뜨리면 전 구역에 들리게 하려고 둔 값이다.
+	 * 태그 하나로 크기를 고정하면 조심해서 내려놓는 플레이가 의미가 없어진다.
+	 *
+	 * [기준] 임펄스 실측은 FLootDurabilityData::DamageImpulseThreshold 주석에 있다 —
+	 *   10kg 기준 100cm 낙하 5031, 착지 후 튐 500~900. 임펄스는 질량에 비례하므로
+	 *   30kg 궤짝을 운반 높이에서 놓으면 대략 15000 이 나온다는 계산으로 잡았다.
+	 *   [확인필요] 중량형 실측은 아직 안 했다. 화면 디버그의 '확정 … 임펄스' 로 맞출 것.
+	 *
+	 * 중량형이 아닌 노획물은 이 값을 쓰지 않는다 — HeavyDrop 소음 자체가 안 나간다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Impact",
+		meta = (ClampMin = "1.0"))
+	float HeavyDropLoudImpulse = 15000.f;
+
 	// 파손 수치(DamageImpulseThreshold / MaxImpactCount)는 여기 없다.
 	// ULootDurabilityComponent 만 읽는 값이라 파손형이 아닌 노획물까지 들고 다닐 이유가 없다.
 	// FLootDurabilityData 로 옮겨 DT_LootDurability 에 행 이름으로 조인한다.

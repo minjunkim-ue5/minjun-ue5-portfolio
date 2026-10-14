@@ -141,6 +141,27 @@ struct FLootDurabilityData : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Durability",
 		meta = (ClampMin = "1"))
 	int32 MaxImpactCount = 3;
+
+	/**
+	 * 파손 1회마다 깎이는 가치의 비율. 0 이면 깨질 때까지 값이 그대로다.
+	 *
+	 * [현재 가치 기준이다 — 원가 기준이 아니다]
+	 *   1000 짜리가 0.3 이면 1000 -> 700 -> 490 으로 간다. 원가의 30% 씩 정액으로 깎으면
+	 *   MaxImpactCount 를 4~5 로 올린 노획물에서 파괴되기 전에 값이 0 에 닿아
+	 *   마지막 충격들이 공짜가 된다. 비율로 깎으면 몇 회짜리든 0 에 닿지 않는다.
+	 *
+	 * [파괴되는 충격에는 적용하지 않는다]
+	 *   마지막 한 대는 Break 가 100% 손실로 0 을 만든다. 여기 값은 '깨지기 전까지'
+	 *   금이 간 만큼의 손실이다. 기획서의 "파괴 시 가치 0" 은 그대로다.
+	 *
+	 * [불안정형과 달리 바닥값이 없다]
+	 *   불안정형은 MinValueRatio 에서 멈추고 물건이 끝까지 남지만, 파손형은 어차피
+	 *   마지막에 0 이 되므로 바닥을 둘 이유가 없다. 금 간 물건을 지금 밴에 넣을지
+	 *   하나 더 주우러 갈지 고민하게 만드는 것이 이 값의 목적이다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Durability",
+		meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ValueLossPerImpact = 0.3f;
 };
 
 /**

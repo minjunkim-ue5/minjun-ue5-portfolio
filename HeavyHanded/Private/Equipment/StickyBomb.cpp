@@ -4,6 +4,7 @@
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"        // TActorIterator
+#include "Hazards/BreakableWall.h"
 #include "Loot/LootLog.h"
 #include "Vault/VaultDoor.h"
 
@@ -66,6 +67,20 @@ void AStickyBomb::OnActivated()
 		}
 	}
 
-	UE_LOG(LogLoot, Log, TEXT("[StickyBomb:%s] 폭발 — 반경 %.0f, 개방한 금고 문 %d개"),
-		*GetName(), BlastRadius, BreachedCount);
+	// 부서지는 벽도 같은 순회 방식으로 처리한다 — AVaultDoor 와 동일 사유(개수가 적고,
+	// 거리 판정은 벽이 자기 표면 기준으로 다시 하므로 오버랩으로 미리 거를 이유가 없다).
+	// ABreakableWall::HitPoints 기본값이 2라 폭탄 한 개로는 안 부서지고, 두 개째에 부서진다 —
+	// 브루트 돌진과 똑같은 HP 를 그대로 공유한다.
+	int32 WallsBrokenCount = 0;
+
+	for (TActorIterator<ABreakableWall> It(World); It; ++It)
+	{
+		if (It->TryBreak(this, GetActorLocation(), BlastRadius))
+		{
+			++WallsBrokenCount;
+		}
+	}
+
+	UE_LOG(LogLoot, Log, TEXT("[StickyBomb:%s] 폭발 — 반경 %.0f, 개방한 금고 문 %d개, 부순 벽 %d개"),
+		*GetName(), BlastRadius, BreachedCount, WallsBrokenCount);
 }

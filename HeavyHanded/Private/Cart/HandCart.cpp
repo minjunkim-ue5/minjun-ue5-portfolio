@@ -3,6 +3,8 @@
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Core/HeavyHandedGameplayTags.h"
+#include "DrawDebugHelpers.h"            // DrawDebugPoint (bShowImpactDebug)
+#include "Engine/Engine.h"               // GEngine (화면 디버그 메시지)
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"                 // TActorIterator (임시 콘솔 명령)
@@ -111,9 +113,18 @@ static FAutoConsoleCommandWithWorld GCartTogglePushCmd(
 
 AHandCart::AHandCart()
 {
-	// 끌고 있는 동안에만 돈다. 맵에 놓인 카트가 아무것도 안 하면서 틱하지 않게 한다.
+	// 항상 돈다. 끌 때는 추종을, 놓여 있을 때는 밀림 저항(ApplyIdlePushDrag)을 맡는다.
+	//
+	// 예전에는 끌고 있는 동안에만 켰다. 놓여 있는 카트에는 할 일이 없었기 때문인데,
+	// 이제는 몸으로 밀리는 속도를 빼내야 해서 그때도 일이 있다.
+	// 잠든 바디는 ApplyIdlePushDrag 가 RigidBodyIsAwake 로 즉시 빠져나간다 —
+	// 맵에 가만히 놓인 카트의 틱 비용은 그 검사 한 번뿐이다.
+	//
+	// 잠들었는지를 이벤트(OnComponentSleep)로 받아 틱을 끄는 방법도 있지만 쓰지 않았다.
+	// 이벤트가 한 번 누락되면 상한이 조용히 안 걸리고, 그건 이 프로젝트에서 제일 찾기 어려운
+	// 종류의 버그다. 매 프레임 직접 물어보는 쪽이 싸고 확실하다.
 	PrimaryActorTick.bCanEverTick = true;
-	PrimaryActorTick.bStartWithTickEnabled = false;
+	PrimaryActorTick.bStartWithTickEnabled = true;
 
 	bReplicates = true;
 	SetReplicateMovement(true);
@@ -175,7 +186,11 @@ void AHandCart::BeginPlay()
 			*GetName());
 	}
 
-	CartMesh->SetMassOverrideInKg(NAME_None, MassKg, true);
+	// 잡힌 상태에 맞는 질량을 넣는다. 시작 시점에는 아무도 잡고 있지 않으니 IdleMassKg 다.
+	ApplyPushState();
+
+	// 이동 속도 측정의 첫 기준점. 안 채우면 첫 창에서 원점까지의 거리가 속도로 잡힌다.
+	ApproachSampleLocation = GetActorLocation();
 
 	if (!bLockTipping)
 	{
@@ -311,6 +326,14 @@ bool AHandCart::IsContaining(const ALootBase* Loot) const
 // 끌기
 // ──────────────────────────────────────────────────────────────
 
+void AHandCart::OnInteract_Implementation(APawn* Interactor)
+{
+	// UGAB_Interact 는 서버 권한에서만 이 함수를 부른다(Interactable.h). 그래도 판정을
+	// TryTogglePush 안에 그대로 두는 것은, 콘솔 명령(hh.Cart.TogglePush)도 같은 문을
+	// 쓰기 때문이다. 입구가 둘이면 검사는 안쪽에 하나만 있어야 한다.
+	TryTogglePush(Interactor);
+}
+
 void AHandCart::TryTogglePush(APawn* Pawn)
 {
 	// Server RPC 는 요청일 뿐이다. 판정은 서버가 한다.
@@ -340,7 +363,10 @@ void AHandCart::TryTogglePush(APawn* Pawn)
 
 	CurrentPusher = Pawn;
 	OnRep_CurrentPusher();      // 서버에서 값을 직접 바꾸면 OnRep 이 안 불린다
-	SetActorTickEnabled(true);
+
+	// 잡는 순간 무상한 구간을 지운다. 놓았다가 곧바로 다시 잡으면 남아 있을 수 있고,
+	// 남아 있으면 다음에 놓을 때 상한이 즉시 걸려 기세가 뚝 끊긴다.
+	ReleaseCoastRemaining = 0.f;
 
 	UE_LOG(LogLoot, Verbose, TEXT("[Cart:%s] %s 가 끌기 시작"), *GetName(), *Pawn->GetName());
 }
@@ -355,9 +381,14 @@ void AHandCart::StopPush()
 	UE_LOG(LogLoot, Verbose, TEXT("[Cart:%s] %s 가 끌기 종료"),
 		*GetName(), *GetNameSafe(CurrentPusher));
 
+	// 놓은 직후 짧은 구간에는 속도 상한을 걸지 않는다. 600cm/s 로 밀던 카트를 놓는 순간
+	// 40 으로 깎으면 기세가 뚝 끊겨 어색하다. 이 구간은 마찰이 감속시킨다.
+	// 질량은 아래 ApplyPushState 가 즉시 IdleMassKg 로 바꾼다 — 이 구간에도 몸으로 밀리는 것은
+	// 억제돼야 하고, 질량을 바꿔도 속도는 그대로 남으므로 굴러가던 기세는 살아 있다.
+	ReleaseCoastRemaining = ReleaseCoastSeconds;
+
 	CurrentPusher = nullptr;
 	OnRep_CurrentPusher();
-	SetActorTickEnabled(false);
 
 	// 손을 놓는 순간 남아 있던 추종 속도로 카트가 혼자 미끄러져 나가지 않게 한다.
 	// 각속도만 끊는다 — 선속도까지 0 으로 만들면 밀던 기세가 뚝 끊겨 어색하다.
@@ -369,13 +400,75 @@ void AHandCart::StopPush()
 
 void AHandCart::OnRep_CurrentPusher()
 {
-	// 지금은 알릴 곳이 없다. 손 붙이기·UI 연출이 붙을 자리다.
-	// 클라이언트에서는 틱을 켜지 않는다 — 추종은 서버만 계산하고 결과만 복제된다.
+	// 손 붙이기·UI 연출이 붙을 자리다.
+
+	// 클라이언트에서 놓임을 받았으면 무상한 구간을 여기서 시작한다.
+	// 서버는 StopPush 가 이미 넣어 뒀다(그쪽은 이 함수를 직접 부르므로 값을 먼저 넣는다).
+	if (!IsValid(CurrentPusher) && !HasAuthority())
+	{
+		ReleaseCoastRemaining = ReleaseCoastSeconds;
+	}
+
+	// 질량은 복제되지 않는다. 양쪽이 "누가 잡고 있는가" 를 보고 각자 반영한다.
+	ApplyPushState();
+}
+
+void AHandCart::ApplyPushState()
+{
+	if (!IsValid(CartMesh))
+	{
+		return;
+	}
+
+	const bool bGrabbed = IsValid(CurrentPusher);
+
+	// 잡고 있으면 설계 질량, 놓여 있으면 몸으로 밀려도 튀지 않는 질량.
+	const float DesiredMass = bGrabbed ? MassKg : IdleMassKg;
+	if (!FMath::IsNearlyEqual(AppliedMassKg, DesiredMass))
+	{
+		CartMesh->SetMassOverrideInKg(NAME_None, DesiredMass, true);
+		AppliedMassKg = DesiredMass;
+	}
+
+	// 잠들어 있으면 UpdateFollow 의 속도 대입이 첫 프레임을 놓친다.
+	if (bGrabbed && !CartMesh->RigidBodyIsAwake())
+	{
+		CartMesh->WakeAllRigidBodies();
+	}
 }
 
 void AHandCart::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	// 실제로 얼마나 이동해 왔는지를 먼저 잰다. 소음 판정과 막힘 판정이 이 값을 본다.
+	// UpdateFollow 가 속도를 대입하기 전에 재야 한다.
+	UpdateApproachSpeed(DeltaSeconds);
+
+	// 놓은 뒤의 무상한 구간은 양쪽 머신에서 각자 흐른다.
+	if (ReleaseCoastRemaining > 0.f)
+	{
+		ReleaseCoastRemaining -= DeltaSeconds;
+	}
+
+	// 잡힌 사람이 GC 로 사라지면 OnRep 도 StopPush 도 안 불린다(서버에서 포인터만 null 이 된다).
+	// 그 경우에도 질량이 되돌아와야 하므로 매 틱 한 번 확인한다 — 값이 같으면 즉시 빠져나간다.
+	ApplyPushState();
+
+	if (!IsValid(CurrentPusher))
+	{
+		// 끌던 사람이 사라졌다(접속 종료·파괴). 카트가 유령을 쫓지 않게 여기서 끊는다.
+		if (HasAuthority() && CurrentPusher)
+		{
+			StopPush();
+		}
+
+		// 저항은 모든 머신에서 걸어야 한다. CMC 의 밀기 힘은 각 머신에서 자기 캐릭터에
+		// 대해 로컬로 들어오므로, 서버에서만 걸면 미는 사람 화면에서만 카트가 날아가고
+		// 그 뒤 복제 보정에 끌려와 덜컹거린다.
+		ApplyIdlePushDrag(DeltaSeconds);
+		return;
+	}
 
 	// 물리 추종은 서버 권위다. 클라이언트가 각자 계산하면 사람마다 카트가 다른 데 있게 된다.
 	if (!HasAuthority())
@@ -383,14 +476,79 @@ void AHandCart::Tick(float DeltaSeconds)
 		return;
 	}
 
-	if (!IsValid(CurrentPusher))
+	UpdateFollow(DeltaSeconds);
+}
+
+void AHandCart::UpdateApproachSpeed(float DeltaSeconds)
+{
+	ApproachSampleAge += DeltaSeconds;
+	if (ApproachSampleAge < ApproachSampleSeconds)
 	{
-		// 끌던 사람이 사라졌다(접속 종료·파괴). 카트가 유령을 쫓지 않게 여기서 끊는다.
-		StopPush();
+		return;   // 창이 끝날 때까지는 직전 창의 값을 그대로 쓴다
+	}
+
+	const FVector CurrentLocation = GetActorLocation();
+
+	// 방향까지 남긴다. 소음 판정이 부딪힌 면의 법선에 투영해야 하기 때문이다.
+	ApproachVelocity = (CurrentLocation - ApproachSampleLocation) / ApproachSampleAge;
+
+	ApproachSampleLocation = CurrentLocation;
+	ApproachSampleAge = 0.f;
+}
+
+void AHandCart::ApplyIdlePushDrag(float DeltaSeconds)
+{
+	if (!IsValid(CartMesh) || !CartMesh->IsSimulatingPhysics()
+		|| IdlePushDrag <= 0.f || DeltaSeconds <= 0.f)
+	{
 		return;
 	}
 
-	UpdateFollow(DeltaSeconds);
+	// 놓은 직후에는 굴러가던 기세를 남긴다. 마찰이 알아서 감속시킨다.
+	if (ReleaseCoastRemaining > 0.f)
+	{
+		return;
+	}
+
+	// 잠든 바디는 빼낼 것이 없다. 맵에 가만히 놓인 카트의 틱은 여기서 끝난다.
+	if (!CartMesh->RigidBodyIsAwake())
+	{
+		return;
+	}
+
+	// 지수 감쇠. 프레임 시간이 길어도 계수가 1 을 넘지 않으므로 저사양에서 속도가 반대로
+	// 튀지 않는다. (1 - Drag * Dt) 로 하면 30fps 에서 Drag 30 만 넘어도 부호가 뒤집힌다.
+	const float Retained = FMath::Exp(-IdlePushDrag * DeltaSeconds);
+
+	const FVector Velocity = CartMesh->GetPhysicsLinearVelocity();
+	const FVector Horizontal(Velocity.X, Velocity.Y, 0.f);
+
+	// 거의 멈춘 상태에서는 손대지 않는다. 속도 대입은 바디를 깨우기 때문에,
+	// 매 프레임 넣으면 멈춰 있는 카트가 영영 잠들지 못하고 틱이 계속 일한다.
+	static constexpr float RestSpeed = 1.f;
+	if (Horizontal.SizeSquared() > FMath::Square(RestSpeed))
+	{
+		// Z 는 건드리지 않는다 — 중력과 바닥 접촉이 계속 살아 있어야 한다.
+		CartMesh->SetPhysicsLinearVelocity(
+			FVector(Velocity.X * Retained, Velocity.Y * Retained, Velocity.Z));
+	}
+
+	// 회전에는 훨씬 센 저항을 건다.
+	//
+	// 밀기 힘은 무게중심이 아니라 접촉점에 걸리므로 요 토크가 생긴다. 카트가 돌면 사람이
+	// 닿는 면과 밀리는 방향이 매번 바뀌어서, 같은 방향으로 밀어도 결과가 달라진다 —
+	// "일관적이지 않다" 는 감각의 큰 몫이 여기서 온다. 회전을 빠르게 죽이면 몸으로 밀 때
+	// 미끄러지듯 밀리기만 해서 예측이 된다. 잡고 끌 때의 회전(UpdateFollow)은 그대로다.
+	static constexpr float YawDragScale = 6.f;
+	static constexpr float RestYawRate = 1.f;
+
+	const FVector AngularVelocity = CartMesh->GetPhysicsAngularVelocityInDegrees();
+	if (FMath::Abs(AngularVelocity.Z) > RestYawRate)
+	{
+		const float YawRetained = FMath::Exp(-IdlePushDrag * YawDragScale * DeltaSeconds);
+		CartMesh->SetPhysicsAngularVelocityInDegrees(
+			FVector(AngularVelocity.X, AngularVelocity.Y, AngularVelocity.Z * YawRetained));
+	}
 }
 
 bool AHandCart::ComputeFollowTarget(FVector& OutLocation, FQuat& OutRotation) const
@@ -469,9 +627,41 @@ void AHandCart::UpdateFollow(float DeltaSeconds)
 	FVector DesiredVelocity = Error * FollowStiffness;
 	DesiredVelocity = DesiredVelocity.GetClampedToMaxSize(MaxFollowSpeed);
 
-	// Z 는 건드리지 않는다. 중력과 바닥 접촉이 계속 살아 있어야 한다.
+	// [막힘] 갈 곳이 있는데 실제로 못 가고 있으면 밀어 넣기를 멈춘다.
+	//
+	// 벽에 막힌 카트에 계속 최고 속도를 대입하면 카트가 벽과 사람 사이에서 눌린다.
+	// 그 상태에서 사람이 앞으로 걸어오면 카트를 파고들고, 실제로 로그에
+	//   "BP_Brute_C_0 is stuck and failed to move! PenetrationDepth: 5.509 Actor: BP_HandCart"
+	// 가 찍혔다(2026-09-08). 솔버가 그 침투를 매 프레임 폭발적으로 풀어내는 것이
+	// 떨림과 900cm/s 짜리 헛속도의 정체다.
+	//
+	// 명령을 끊으면 카트가 벽에 가만히 붙어 있고, 사람은 '움직이지 않는 카트에 막힌' 상태가 된다.
+	// 그게 원래 의도한 "좁은 통로 불가" 다 — 카트 안에 박히는 것이 아니었다.
+	//
+	// 판정은 두 조건이 함께 맞을 때만이다. 목표에 이미 도달해 느린 것과 구별해야 한다.
+	static constexpr float BlockedErrorDistance = 50.f;   // 이보다 멀면 '갈 곳이 있다'
+	static constexpr float BlockedSpeed = 40.f;           // 이보다 느리면 '못 가고 있다'
+	if (Error.Size2D() > BlockedErrorDistance && ApproachVelocity.Size2D() < BlockedSpeed)
+	{
+		DesiredVelocity.X = 0.f;
+		DesiredVelocity.Y = 0.f;
+	}
+
+	// Z 는 내려가는 쪽을 건드리지 않는다. 중력과 바닥 접촉이 계속 살아 있어야 한다.
+	//
+	// 올라가는 쪽만 막는다. 바닥 이음새나 콜리전 모서리에 걸려도 우리가 수평 속도 대입을
+	// 멈추지 않기 때문에, 솔버가 그 겹침을 위로 풀어내면서 카트가 중간중간 튀어 오른다.
+	// 그렇게 생긴 상승 속도를 그대로 보존해 왔던 것이 눈에 보이는 증상이었다.
 	const FVector CurrentVelocity = CartMesh->GetPhysicsLinearVelocity();
-	CartMesh->SetPhysicsLinearVelocity(FVector(DesiredVelocity.X, DesiredVelocity.Y, CurrentVelocity.Z));
+
+	float VerticalVelocity = CurrentVelocity.Z;
+	if (MaxRiseSpeedWhilePushed > 0.f)
+	{
+		VerticalVelocity = FMath::Min(VerticalVelocity, MaxRiseSpeedWhilePushed);
+	}
+
+	CartMesh->SetPhysicsLinearVelocity(
+		FVector(DesiredVelocity.X, DesiredVelocity.Y, VerticalVelocity));
 
 	// [회전] 요 오차를 각속도로. X·Y 회전은 생성자에서 잠가 두었으므로 여기서도 0 이다.
 	const float YawError = FMath::FindDeltaAngleDegrees(GetActorRotation().Yaw, TargetRotation.Rotator().Yaw);
@@ -577,29 +767,43 @@ bool AHandCart::ShouldReportHitAsNoise(const AActor* OtherActor) const
 }
 
 void AHandCart::HandleCartHit(UPrimitiveComponent* /*HitComponent*/, AActor* OtherActor,
-	UPrimitiveComponent* /*OtherComp*/, FVector NormalImpulse, const FHitResult& Hit)
+	// NormalImpulse 는 일부러 안 쓴다. 마찰이 섞여 있어서 크기도 방향도 못 믿는다 —
+	// 이유는 NoiseMinApproachSpeed 주석에 적었다. 판정은 Hit.ImpactNormal 로 한다.
+	UPrimitiveComponent* /*OtherComp*/, FVector /*NormalImpulse*/, const FHitResult& Hit)
 {
 	// 클라이언트의 물리 충돌은 신뢰하지 않는다. 시뮬레이션 결과가 머신마다 다르다.
 	const UWorld* World = GetWorld();
-	if (!HasAuthority() || !World || !ShouldReportHitAsNoise(OtherActor))
+	if (!HasAuthority() || !World)
 	{
 		return;
 	}
 
-	const float ImpulseMagnitude = NormalImpulse.Size();
-
-	// [1겹] 임계값 미만 무시. 벽을 스치거나 바닥에 얹혀 있는 접촉까지 전부 OnHit 으로 온다.
-	if (ImpulseMagnitude < NoiseImpulseThreshold)
+	if (!ShouldReportHitAsNoise(OtherActor))
 	{
+		ShowRejectDebug(
+			FString::Printf(TEXT("기각(대상 제외) %s"), *GetNameSafe(OtherActor)),
+			FColor::Cyan, Hit.ImpactPoint);
 		return;
 	}
 
-	// [1.5겹] 수직 충격은 카트가 부딪힌 것이 아니라 실린 하중이 바닥으로 빠지는 것이다.
-	// 이걸 안 막으면 물건을 실을 때마다 카트가 바닥을 치면서 소리가 난다. (헤더 주석 참고)
-	if (FMath::Abs(NormalImpulse.GetSafeNormal().Z) >= NoiseVerticalImpactCutoff)
+	// [1겹] 이 면을 향해 빠르게 다가가다 부딪힌 것만 소음으로 친다.
+	//
+	// 창 동안의 실제 이동 속도를 부딪힌 면의 법선에 투영한다 = '닫히는 속도'.
+	// 평지를 굴러갈 때 바닥과의 접촉은 이동이 법선과 직각이라 0 이 되고, 벽에 정면으로
+	// 박으면 이동 속도가 그대로 나온다. 벽을 스치는 것도 0 에 가깝다 — 긁는 것은 부딪힘이 아니다.
+	//
+	// 법선은 Hit.ImpactNormal 을 쓴다. NormalImpulse 에는 마찰이 섞여 있어서, 빠르게
+	// 굴러갈 때 그 방향이 수평으로 잡히고 바닥이 '벽에 박은 것' 처럼 통과한다.
+	// (실제로 그 증상이 나왔다 — 평지 주행에 소음 1.00)
+	//
+	// 세기를 임펄스로 재지 않는 이유는 헤더 주석에 적었다.
+	const float ClosingSpeed = -FVector::DotProduct(ApproachVelocity, Hit.ImpactNormal);
+	if (NoiseMinApproachSpeed > 0.f && ClosingSpeed < NoiseMinApproachSpeed)
 	{
-		UE_LOG(LogLoot, Verbose, TEXT("[Cart:%s] 수직 충격 무시 (%s, 세기 %.0f)"),
-			*GetName(), *GetNameSafe(OtherActor), ImpulseMagnitude);
+		ShowRejectDebug(
+			FString::Printf(TEXT("기각(다가간 게 아님) %s 닫힘 %.0f < %.0f"),
+				*GetNameSafe(OtherActor), ClosingSpeed, NoiseMinApproachSpeed),
+			FColor::Orange, Hit.ImpactPoint);
 		return;
 	}
 
@@ -611,6 +815,10 @@ void AHandCart::HandleCartHit(UPrimitiveComponent* /*HitComponent*/, AActor* Oth
 	{
 		if (Now - *Last < NoiseDebounceSeconds)
 		{
+			ShowRejectDebug(
+				FString::Printf(TEXT("기각(%.1f초 내 재충돌) %s 직전 %.0f"),
+					NoiseDebounceSeconds, *GetNameSafe(OtherActor), ClosingSpeed),
+				FColor::Yellow, Hit.ImpactPoint);
 			return;
 		}
 	}
@@ -637,9 +845,52 @@ void AHandCart::HandleCartHit(UPrimitiveComponent* /*HitComponent*/, AActor* Oth
 	// 아직 카트 전용 행이 없어서 Noise.Loot.Impact 를 쓴다. 카트가 벽에 박는 소리를
 	// 따로 튜닝하고 싶어지면 소음 파트에 행 추가를 요청할 것.
 	// 굴러가는 지속음은 넣지 않기로 했다 (2026-08-20).
-	const float LoudnessScale = FMath::Clamp(ImpulseMagnitude / NoiseFullImpulse, 0.f, 1.f);
+	const float LoudnessScale = FMath::Clamp(ClosingSpeed / NoiseLoudSpeed, 0.f, 1.f);
 	Noise->ReportNoise(HHTags::Noise_Loot_Impact, Hit.ImpactPoint, LoudnessScale, this);
 
-	UE_LOG(LogLoot, Verbose, TEXT("[Cart:%s] 충돌 소음 %.2f (%s, 세기 %.0f)"),
-		*GetName(), LoudnessScale, *GetNameSafe(OtherActor), ImpulseMagnitude);
+	UE_LOG(LogLoot, Verbose, TEXT("[Cart:%s] 충돌 소음 %.2f (%s, 직전 %.0fcm/s)"),
+		*GetName(), LoudnessScale, *GetNameSafe(OtherActor), ClosingSpeed);
+
+	ShowImpactDebug(
+		FString::Printf(TEXT("확정! 소음 %.2f — %s 직전 %.0fcm/s"),
+			LoudnessScale, *GetNameSafe(OtherActor), ClosingSpeed),
+		FColor::Red, Hit.ImpactPoint);
+}
+
+void AHandCart::ShowRejectDebug(const FString& Message, const FColor& Color,
+	const FVector& Location) const
+{
+	// 기각은 확정보다 압도적으로 자주 나온다. 벽에 대고 있으면 바닥·벽·문에서 매 프레임
+	// 서너 줄씩 들어와서, 정작 봐야 할 확정 한 줄이 화면 밖으로 밀려난다.
+	if (!bShowRejectedImpacts)
+	{
+		return;
+	}
+
+	ShowImpactDebug(Message, Color, Location);
+}
+
+void AHandCart::ShowImpactDebug(const FString& Message, const FColor& Color,
+	const FVector& Location) const
+{
+	if (!bShowImpactDebug)
+	{
+		return;
+	}
+
+	UE_LOG(LogLoot, Log, TEXT("[Cart:%s] %s"), *GetName(), *Message);
+
+	if (GEngine)
+	{
+		// 키를 -1 로 주면 줄이 덮어써지지 않고 쌓인다. 몇 번 왔는지를 봐야 하므로 쌓아야 한다.
+		GEngine->AddOnScreenDebugMessage(-1, 4.f, Color,
+			FString::Printf(TEXT("[%s] %s"), *GetName(), *Message));
+	}
+
+#if ENABLE_DRAW_DEBUG
+	if (const UWorld* World = GetWorld())
+	{
+		DrawDebugPoint(World, Location, 12.f, Color, /*bPersistent=*/false, 2.f);
+	}
+#endif
 }

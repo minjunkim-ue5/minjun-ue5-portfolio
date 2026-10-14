@@ -6,7 +6,7 @@ Unreal Engine 5 / C++ 팀 프로젝트에서 본인이 직접 작성한 소스�
 
 | 프로젝트 | 기간 | 팀 | 담당 | 수록 |
 |---|---|---|---|---|
-| [**HEAVY HANDED**](./HeavyHanded) — 2~4인 협동 물리 운반 하이스트 | 2026.08.06 ~ 진행 중 | 6인 | 물리 / 아이템 단독 | 19파일 · 7,425줄 |
+| [**HEAVY HANDED**](./HeavyHanded) — 2~4인 협동 물리 운반 하이스트 | 2026.08.06 ~ 진행 중 | 6인 | 물리 / 아이템 단독 | 41파일 · 11,820줄 |
 | [**Project_Dwarf_Extraction**](./DwarfExtraction) — 4인 협동 1인칭 호러 | 2026.07.02 ~ 08.04 | 4인 | Player 단독 | 18파일 · 약 4,700줄 |
 
 두 프로젝트를 관통하는 주제는 **"서버 권위 구조에서 클라이언트만 실패하는 버그"** 입니다.
@@ -15,9 +15,10 @@ Unreal Engine 5 / C++ 팀 프로젝트에서 본인이 직접 작성한 소스�
 ## 기술 스택
 
 - **언어 / 엔진** — C++, Unreal Engine 5.4
-- **네트워크** — Replication (Server / Multicast / Client RPC, RepNotify), Listen Server, 서버 권위 판정
-- **물리** — SimulatePhysics, OnComponentHit, Sweep, MTD(ComputePenetration), PhysicalMaterial
-- **게임플레이** — GAS(ASC / AttributeSet / GameplayAbility), GameplayTag, DataTable, UActorComponent 조합, UInterface
+- **네트워크** — Replication (Server / Multicast / Client RPC, RepNotify), Listen Server, 서버 권위 판정, Physics Replication Mode
+- **물리** — SimulatePhysics, OnComponentHit, Sweep, MTD(ComputePenetration), PhysicalMaterial, Chaos 솔버 코드 추적
+- **게임플레이** — GAS(ASC / AttributeSet / GameplayAbility), GameplayTag, DataTable, UDeveloperSettings, UActorComponent 조합, UInterface
+- **입출력 / 연출** — Enhanced Input (IMC 우선순위로 입력 가로채기), Niagara User 파라미터 연동
 - **협업** — Git / Git LFS, 브랜치 전략, `.gitattributes` 바이너리 잠금
 
 ## Contact
